@@ -88,7 +88,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         log("PIPELINE_HALT: expectation suite failed (halt).")
         return 2
     if halt and args.skip_validate:
-        log("WARN: expectation failed but --skip-validate → tiếp tục embed (chỉ dùng cho demo Sprint 3).")
+        log("WARN: expectation failed but --skip-validate; continuing embed (Sprint 3 demo only).")
 
     # Embed
     embed_ok = cmd_embed_internal(

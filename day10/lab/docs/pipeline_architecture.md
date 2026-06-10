@@ -1,44 +1,49 @@
-# Kiến trúc pipeline — Lab Day 10
+# Kiến trúc pipeline - Lab Day 10
 
-**Nhóm:** _______________  
-**Cập nhật:** _______________
+**Nhóm:** Lab team
+**Cập nhật:** 2026-06-10
 
----
+## 1. Sơ đồ luồng
 
-## 1. Sơ đồ luồng (bắt buộc có 1 diagram: Mermaid / ASCII)
-
+```mermaid
+flowchart LR
+    A[Raw CSV<br/>247 records] -->|run_id| B[Ingest]
+    B --> C[Clean + version rules]
+    C --> D[Cleaned CSV<br/>35 records]
+    C --> Q[Quarantine CSV<br/>212 records]
+    D --> E{Expectation gate}
+    E -->|halt| Q
+    E -->|pass| F[Chroma upsert + prune]
+    F --> G[Retrieval serving]
+    F --> M[Manifest + freshness at publish]
 ```
-raw export (CSV/API/…)  →  clean  →  validate (expectations)  →  embed (Chroma)  →  serving (Day 08/09)
-```
 
-> Vẽ thêm: điểm đo **freshness**, chỗ ghi **run_id**, và file **quarantine**.
-
----
+`run_id` xuất hiện trong log, manifest, tên cleaned/quarantine CSV và metadata vector.
+Freshness được đo sau publish từ `latest_exported_at` trong manifest.
 
 ## 2. Ranh giới trách nhiệm
 
-| Thành phần | Input | Output | Owner nhóm |
-|------------|-------|--------|--------------|
-| Ingest | … | … | … |
-| Transform | … | … | … |
-| Quality | … | … | … |
-| Embed | … | … | … |
-| Monitor | … | … | … |
+| Thành phần | Input | Output | Owner |
+|---|---|---|---|
+| Ingest | `data/raw/policy_export_dirty.csv` | danh sách raw rows | Data Engineering |
+| Transform | raw rows + allowlist/version rules | cleaned + quarantine | Data Quality |
+| Quality | cleaned rows | warn/halt results | Data Quality |
+| Embed | cleaned CSV | snapshot collection `day10_kb` | AI Platform |
+| Monitor | manifest | PASS/WARN/FAIL freshness | AI Platform |
 
----
+## 3. Idempotency và rerun
 
-## 3. Idempotency & rerun
-
-> Mô tả: upsert theo `chunk_id` hay strategy khác? Rerun 2 lần có duplicate vector không?
-
----
+Vector được `upsert` theo `chunk_id`; trước upsert, pipeline xóa mọi ID không còn trong snapshot cleaned.
+Hai lần chạy cùng code giữ collection ở 35 vector, không tạo duplicate. Khi chuyển từ inject sang clean,
+log ghi `embed_prune_removed=2`; khi alias retrieval đổi, snapshot mới prune đúng một ID cũ.
 
 ## 4. Liên hệ Day 09
 
-> Pipeline này cung cấp / làm mới corpus cho retrieval trong `day09/lab` như thế nào? (cùng `data/docs/` hay export riêng?)
-
----
+Collection `day10_kb` là serving boundary cho retriever/agent. Day 09 có thể trỏ
+`CHROMA_DB_PATH` và `CHROMA_COLLECTION` vào collection này để chỉ đọc corpus đã qua quality gate.
 
 ## 5. Rủi ro đã biết
 
-- …
+- Snapshot mẫu có `latest_exported_at=2026-04-11`, nên freshness FAIL tại ngày chạy 2026-06-10.
+- Alias retrieval hiện là rule theo domain; production nên quản lý synonym trong catalog có version.
+- Allowlist cần được cập nhật đồng bộ với contract khi thêm nguồn canonical.

@@ -144,6 +144,12 @@ cp .env.example .env
 
 ## Chạy pipeline
 
+### Một lệnh tái lập pipeline + eval + grading
+
+```powershell
+python etl_pipeline.py run --run-id final-clean-v3; python eval_retrieval.py --out artifacts/eval/after_fix_eval.csv; python grading_run.py --out artifacts/eval/grading_run.jsonl
+```
+
 ### Luồng chuẩn (sau khi đã sửa pipeline)
 
 ```bash

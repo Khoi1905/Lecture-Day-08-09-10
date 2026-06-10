@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -20,11 +21,15 @@ ALLOWED_DOC_IDS = frozenset(
         "sla_p1_2026",
         "it_helpdesk_faq",
         "hr_leave_policy",
+        "access_control_sop",
     }
 )
 
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DMY_SLASH = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
+_AMBIGUOUS_PREFIX = "Nội dung không rõ ràng:"
+_STALE_HR_ANNUAL_MARKER = "10 ngày phép năm"
+_REPEATED_WORKING_DAY = re.compile(r"(?:\blàm việc\s+){2,}", re.IGNORECASE)
 
 
 def _norm_text(s: str) -> str:
@@ -53,6 +58,33 @@ def _normalize_effective_date(raw: str) -> Tuple[str, str]:
     return "", "invalid_effective_date_format"
 
 
+def _is_iso_datetime(raw: str) -> bool:
+    """Rule: exported_at must satisfy the cleaned data contract."""
+    s = (raw or "").strip()
+    if not s:
+        return False
+    try:
+        datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return "T" in s
+    except ValueError:
+        return False
+
+
+def _normalize_repeated_words(text: str) -> str:
+    """Rule: collapse repeated 'làm việc' tokens caused by sync corruption."""
+    return _REPEATED_WORKING_DAY.sub("làm việc ", text).strip()
+
+
+def _add_retrieval_aliases(doc_id: str, text: str) -> str:
+    """Rule: add a meaning-preserving alias for mixed Vietnamese/English queries."""
+    if doc_id == "sla_p1_2026" and "tự động escalate" in text and "10 phút" in text:
+        return (
+            f"{text} Alias truy vấn: nếu không có phản hồi với ticket P1, "
+            "hệ thống tự động escalate (auto escalate) sau 10 phút."
+        )
+    return text
+
+
 def load_raw_csv(path: Path) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     with path.open(encoding="utf-8", newline="") as f:
@@ -70,13 +102,14 @@ def clean_rows(
     """
     Trả về (cleaned, quarantine).
 
-    Baseline (mở rộng theo narrative Day 10):
+    Rules (baseline + measurable extensions):
     1) Quarantine: doc_id không thuộc allowlist (export lạ / catalog sai).
     2) Chuẩn hoá effective_date sang YYYY-MM-DD; quarantine nếu không parse được.
-    3) Quarantine: chunk hr_leave_policy có effective_date < 2026-01-01 (bản HR cũ / conflict version).
-    4) Quarantine: chunk_text rỗng hoặc effective_date rỗng sau chuẩn hoá.
-    5) Loại trùng nội dung chunk_text (giữ bản đầu).
-    6) Fix stale refund: policy_refund_v4 chứa '14 ngày làm việc' → 7 ngày.
+    3) Quarantine exported_at không phải ISO datetime theo data contract.
+    4) Quarantine HR stale theo effective_date hoặc marker nội dung bản 2025.
+    5) Quarantine chunk_text rỗng / mơ hồ; chuẩn hoá token lặp do sync lỗi.
+    6) Loại trùng nội dung trong cùng doc_id (giữ bản đầu).
+    7) Fix stale refund: policy_refund_v4 chứa '14 ngày làm việc' → 7 ngày.
     """
     quarantine: List[Dict[str, Any]] = []
     seen_text: set[str] = set()
@@ -101,6 +134,11 @@ def clean_rows(
             quarantine.append({**raw, "reason": eff_err, "effective_date_raw": eff_raw})
             continue
 
+        # New rule 1: contract violation must not reach the publish boundary.
+        if not _is_iso_datetime(exported_at):
+            quarantine.append({**raw, "reason": "invalid_exported_at_format"})
+            continue
+
         if doc_id == "hr_leave_policy" and eff_norm < "2026-01-01":
             quarantine.append(
                 {
@@ -111,17 +149,29 @@ def clean_rows(
             )
             continue
 
+        # New rule 2: stale HR content can carry a new date, so inspect content too.
+        if doc_id == "hr_leave_policy" and _STALE_HR_ANNUAL_MARKER in text:
+            quarantine.append({**raw, "reason": "stale_hr_policy_content_marker"})
+            continue
+
         if not text:
             quarantine.append({**raw, "reason": "missing_chunk_text"})
             continue
 
-        key = _norm_text(text)
+        # New rule 3: low-confidence parser output is not suitable for retrieval.
+        if text.startswith(_AMBIGUOUS_PREFIX):
+            quarantine.append({**raw, "reason": "ambiguous_chunk_text"})
+            continue
+
+        # New rule 4: repair a measurable repeated-token sync corruption.
+        fixed_text = _add_retrieval_aliases(doc_id, _normalize_repeated_words(text))
+
+        key = f"{doc_id}|{_norm_text(fixed_text)}"
         if key in seen_text:
             quarantine.append({**raw, "reason": "duplicate_chunk_text"})
             continue
         seen_text.add(key)
 
-        fixed_text = text
         if apply_refund_window_fix and doc_id == "policy_refund_v4":
             if "14 ngày làm việc" in fixed_text:
                 fixed_text = fixed_text.replace(

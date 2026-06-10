@@ -10,6 +10,14 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
+CANONICAL_DOC_IDS = {
+    "policy_refund_v4",
+    "sla_p1_2026",
+    "it_helpdesk_faq",
+    "hr_leave_policy",
+    "access_control_sop",
+}
+
 
 @dataclass
 class ExpectationResult:
@@ -109,6 +117,74 @@ def run_expectations(cleaned_rows: List[Dict[str, Any]]) -> Tuple[List[Expectati
             ok6,
             "halt",
             f"violations={len(bad_hr_annual)}",
+        )
+    )
+
+    # E7 (new, halt): every canonical source required by retrieval must be published.
+    present_doc_ids = {str(r.get("doc_id") or "") for r in cleaned_rows}
+    missing_canonical = sorted(CANONICAL_DOC_IDS - present_doc_ids)
+    results.append(
+        ExpectationResult(
+            "all_canonical_docs_present",
+            not missing_canonical,
+            "halt",
+            f"missing={missing_canonical}",
+        )
+    )
+
+    # E8 (new, halt): cleaned output cannot publish unregistered sources.
+    unexpected_doc_ids = sorted(present_doc_ids - CANONICAL_DOC_IDS)
+    results.append(
+        ExpectationResult(
+            "only_registered_doc_ids",
+            not unexpected_doc_ids,
+            "halt",
+            f"unexpected={unexpected_doc_ids}",
+        )
+    )
+
+    # E9 (new, halt): upsert keys must be unique for idempotent snapshot publishing.
+    chunk_ids = [str(r.get("chunk_id") or "") for r in cleaned_rows]
+    duplicate_chunk_ids = len(chunk_ids) - len(set(chunk_ids))
+    results.append(
+        ExpectationResult(
+            "unique_nonempty_chunk_ids",
+            bool(chunk_ids) and all(chunk_ids) and duplicate_chunk_ids == 0,
+            "halt",
+            f"empty={sum(not x for x in chunk_ids)}, duplicates={duplicate_chunk_ids}",
+        )
+    )
+
+    # E10 (new, halt): publish freshness is meaningful only with valid ISO timestamps.
+    bad_exported_at = [
+        r
+        for r in cleaned_rows
+        if not re.match(
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",
+            (r.get("exported_at") or "").strip(),
+        )
+    ]
+    results.append(
+        ExpectationResult(
+            "exported_at_iso_datetime",
+            not bad_exported_at,
+            "halt",
+            f"non_iso_rows={len(bad_exported_at)}",
+        )
+    )
+
+    # E11 (new, warn): parser confidence markers should be quarantined.
+    ambiguous = [
+        r
+        for r in cleaned_rows
+        if (r.get("chunk_text") or "").startswith("Nội dung không rõ ràng:")
+    ]
+    results.append(
+        ExpectationResult(
+            "no_ambiguous_parser_markers",
+            not ambiguous,
+            "warn",
+            f"violations={len(ambiguous)}",
         )
     )
 
